@@ -1,0 +1,1 @@
+from .fanesi2025 import Fanesi2025

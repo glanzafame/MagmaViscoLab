@@ -1,0 +1,6 @@
+# Direct runtime dependencies; versions are not pinned.
+PySide6
+matplotlib
+numpy
+pandas
+openpyxl
