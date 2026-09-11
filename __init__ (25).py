@@ -1,1 +1,0 @@
-from .shaw1972 import Shaw1972

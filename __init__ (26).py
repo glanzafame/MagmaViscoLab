@@ -1,1 +1,0 @@
-from .stopponi2026 import Stopponi2026
