@@ -78,9 +78,16 @@ class Plot3DWindow(QMainWindow):
     RESULTS = PlotWindow.RESULTS
     STYLE = PlotWindow.STYLE
 
-    PLOT_RESULT_KEYS = tuple(
-        result["key"]
-        for result in RESULTS.values()
+    # Store every quantity needed by both the plot and the Excel export.
+    # The four log-viscosities are selectable as Z results; eta_r_c and
+    # eta_r_b are additionally retained for complete and consistent exports.
+    PLOT_RESULT_KEYS = (
+        *(
+            result["key"]
+            for result in RESULTS.values()
+        ),
+        "eta_r_c",
+        "eta_r_b",
     )
 
     Z_EXPORT_LABELS = {
@@ -1310,67 +1317,308 @@ class Plot3DWindow(QMainWindow):
         return True
 
     def _write_excel(self, filename):
-        """Export calculation snapshots: one tidy data sheet per sample."""
+        """Export calculation snapshots using the standard MVL workbook layout."""
         used_names = {"parameters", "samples"}
-        metadata = [("Displayed viscosity", self.RESULTS[self.last_z_result_id]["title"]),
-                    ("X axis", self.EXPORT_AXIS_LABELS[self.last_x_parameter]),
-                    ("Y axis", self.EXPORT_AXIS_LABELS[self.last_y_parameter])]
+
+        metadata = [
+            (
+                "Displayed viscosity",
+                self.RESULTS[self.last_z_result_id]["title"],
+            ),
+            (
+                "X axis",
+                self.EXPORT_AXIS_LABELS[self.last_x_parameter],
+            ),
+            (
+                "Y axis",
+                self.EXPORT_AXIS_LABELS[self.last_y_parameter],
+            ),
+        ]
+
         for axis in ("x", "y"):
-            for name, value in zip(("From", "To", "Step"), self.last_ranges[axis]):
-                metadata.append((f"{axis.upper()} {name}", value))
+            for name, value in zip(
+                ("From", "To", "Step"),
+                self.last_ranges[axis],
+            ):
+                metadata.append(
+                    (f"{axis.upper()} {name}", value)
+                )
+
         for group in ("melt", "crystal", "vesicle"):
-            metadata.append((f"{group.title()} model", self.last_settings[f"{group}_model"]))
-            metadata.extend((f"{group.title()} parameter — {name}", value)
-                            for name, value in self.last_settings[f"{group}_parameters"].items())
-        metadata.append(("Sample inputs", "Samples sheet contains fixed inputs; X/Y columns override the swept values at each grid point."))
+            metadata.append(
+                (
+                    f"{group.title()} model",
+                    self.last_settings[f"{group}_model"],
+                )
+            )
+            metadata.extend(
+                (
+                    f"{group.title()} parameter — {name}",
+                    value,
+                )
+                for name, value in
+                self.last_settings[
+                    f"{group}_parameters"
+                ].items()
+            )
+
+        metadata.append(
+            (
+                "Sample inputs",
+                "Samples sheet contains fixed inputs; "
+                "X/Y columns override the swept values "
+                "at each grid point.",
+            )
+        )
+
         snapshots = []
-        oxides = list(getattr(getattr(self.main_window, "composition_panel", None), "OXIDES", ()))
+        oxides = list(
+            getattr(
+                getattr(
+                    self.main_window,
+                    "composition_panel",
+                    None,
+                ),
+                "OXIDES",
+                (),
+            )
+        )
+
         for name, sample in self.last_plot_samples.items():
             record = {"Sample": name}
-            for parameter, attribute in self.SAMPLE_ATTRIBUTES.items():
-                record[self.EXPORT_AXIS_LABELS[parameter]] = getattr(sample, attribute)
-            attributes = vars(sample) if hasattr(sample, "__dict__") else {}
-            for attribute in dict.fromkeys([*oxides, *attributes]):
-                if attribute in {"name", *self.SAMPLE_ATTRIBUTES.values(), *self.PLOT_RESULT_KEYS, "eta_r_c", "eta_r_b"}:
+
+            for parameter, attribute in (
+                self.SAMPLE_ATTRIBUTES.items()
+            ):
+                record[
+                    self.EXPORT_AXIS_LABELS[parameter]
+                ] = getattr(sample, attribute)
+
+            attributes = (
+                vars(sample)
+                if hasattr(sample, "__dict__")
+                else {}
+            )
+
+            for attribute in dict.fromkeys(
+                [*oxides, *attributes]
+            ):
+                if attribute in {
+                    "name",
+                    *self.SAMPLE_ATTRIBUTES.values(),
+                    *self.PLOT_RESULT_KEYS,
+                }:
                     continue
-                value = getattr(sample, attribute, None)
-                if value is None or isinstance(value, (str, int, float, bool, np.number)):
-                    record[f"{attribute} (wt%)" if attribute in oxides else attribute] = value
+
+                value = getattr(
+                    sample,
+                    attribute,
+                    None,
+                )
+
+                if (
+                    value is None
+                    or isinstance(
+                        value,
+                        (
+                            str,
+                            int,
+                            float,
+                            bool,
+                            np.number,
+                        ),
+                    )
+                ):
+                    record[
+                        (
+                            f"{attribute} (wt%)"
+                            if attribute in oxides
+                            else attribute
+                        )
+                    ] = value
+
             snapshots.append(record)
-        with pd.ExcelWriter(filename, engine="openpyxl") as writer:
-            for name, arrays in self.result_surfaces.items():
-                data = {self.EXPORT_AXIS_LABELS[self.last_x_parameter]: self.X.ravel(),
-                        self.EXPORT_AXIS_LABELS[self.last_y_parameter]: self.Y.ravel()}
-                for result_id, info in self.RESULTS.items():
-                    data[f"log₁₀ η{result_id} (Pa·s)"] = arrays[info["key"]].ravel()
-                data["Status"] = ["Error" if (name, row, col) in self._error_messages else "OK" for row, col in np.ndindex(self.X.shape)]
-                data["Error"] = [self._error_messages.get((name, row, col), "") for row, col in np.ndindex(self.X.shape)]
-                sheet = self.make_sheet_name(name, used_names)
-                data = {"Sample": [name] * self.X.size, **data}
-                pd.DataFrame(data).to_excel(writer, sheet_name=sheet, index=False)
-            pd.DataFrame(metadata, columns=["Parameter", "Value"]).to_excel(writer, sheet_name="Parameters", index=False)
-            pd.DataFrame(snapshots).to_excel(writer, sheet_name="Samples", index=False)
+
+        with pd.ExcelWriter(
+            filename,
+            engine="openpyxl",
+        ) as writer:
+
+            for name, arrays in (
+                self.result_surfaces.items()
+            ):
+                data = {
+                    self.EXPORT_AXIS_LABELS[
+                        self.last_x_parameter
+                    ]:
+                        self.X.ravel(),
+
+                    self.EXPORT_AXIS_LABELS[
+                        self.last_y_parameter
+                    ]:
+                        self.Y.ravel(),
+
+                    "Melt viscosity log₁₀ ηm (Pa·s)":
+                        arrays[
+                            "log10_eta_m"
+                        ].ravel(),
+
+                    "Crystal correction factor ηr,c":
+                        arrays[
+                            "eta_r_c"
+                        ].ravel(),
+
+                    "Crystal-bearing magma viscosity "
+                    "log₁₀ ηmc (Pa·s)":
+                        arrays[
+                            "log10_eta_mc"
+                        ].ravel(),
+
+                    "Vesicle correction factor ηr,b":
+                        arrays[
+                            "eta_r_b"
+                        ].ravel(),
+
+                    "Vesicle-bearing magma viscosity "
+                    "log₁₀ ηmb (Pa·s)":
+                        arrays[
+                            "log10_eta_mb"
+                        ].ravel(),
+
+                    "Three-phase magma viscosity "
+                    "log₁₀ ηmcb (Pa·s)":
+                        arrays[
+                            "log10_eta_mcb"
+                        ].ravel(),
+                }
+
+                data["Status"] = [
+                    (
+                        "Error"
+                        if (
+                            name,
+                            row,
+                            col,
+                        ) in self._error_messages
+                        else "OK"
+                    )
+                    for row, col
+                    in np.ndindex(self.X.shape)
+                ]
+
+                data["Error"] = [
+                    self._error_messages.get(
+                        (name, row, col),
+                        "",
+                    )
+                    for row, col
+                    in np.ndindex(self.X.shape)
+                ]
+
+                sheet = self.make_sheet_name(
+                    name,
+                    used_names,
+                )
+
+                data = {
+                    "Sample":
+                        [name] * self.X.size,
+                    **data,
+                }
+
+                pd.DataFrame(data).to_excel(
+                    writer,
+                    sheet_name=sheet,
+                    index=False,
+                )
+
+            pd.DataFrame(
+                metadata,
+                columns=["Parameter", "Value"],
+            ).to_excel(
+                writer,
+                sheet_name="Parameters",
+                index=False,
+            )
+
+            pd.DataFrame(
+                snapshots,
+            ).to_excel(
+                writer,
+                sheet_name="Samples",
+                index=False,
+            )
+
             for sheet in writer.book.worksheets:
                 sheet.freeze_panes = "A2"
-                sheet.auto_filter.ref = sheet.dimensions
-                for cells in sheet.iter_cols(min_row=1, max_row=1):
+                sheet.auto_filter.ref = (
+                    sheet.dimensions
+                )
+
+                for cells in sheet.iter_cols(
+                    min_row=1,
+                    max_row=1,
+                ):
                     cell = cells[0]
-                    sheet.column_dimensions[cell.column_letter].width = min(40, max(17, len(str(cell.value)) + 3))
-        PlotWindow._format_excel_subscripts(filename)
+                    sheet.column_dimensions[
+                        cell.column_letter
+                    ].width = min(
+                        40,
+                        max(
+                            17,
+                            len(
+                                str(cell.value)
+                            ) + 3,
+                        ),
+                    )
+
+        PlotWindow._format_excel_subscripts(
+            filename
+        )
 
     def export_data(self):
         if not self._export_ready():
             return
-        filename, _ = QFileDialog.getSaveFileName(self, "Export 3D data", "MVL_3D_plot.xlsx", "Excel Files (*.xlsx)")
+
+        filename, _ = (
+            QFileDialog.getSaveFileName(
+                self,
+                "Export 3D data",
+                "MVL_3D_plot.xlsx",
+                "Excel Files (*.xlsx)",
+            )
+        )
+
         if not filename:
             return
-        if not filename.lower().endswith(".xlsx"):
+
+        if not filename.lower().endswith(
+            ".xlsx"
+        ):
             filename += ".xlsx"
+
         try:
             self._write_excel(filename)
-            QMessageBox.information(self, "Export completed", f"Saved {len(self.result_surfaces)} sample sheet(s), all four viscosities and calculation settings.\n\n{filename}")
+
+            QMessageBox.information(
+                self,
+                "Export completed",
+                (
+                    f"Saved "
+                    f"{len(self.result_surfaces)} "
+                    "sample sheet(s), all four "
+                    "viscosities, ηr,c, ηr,b and "
+                    "calculation settings."
+                    f"\n\n{filename}"
+                ),
+            )
+
         except Exception as error:
-            QMessageBox.critical(self, "Export error", str(error))
+            QMessageBox.critical(
+                self,
+                "Export error",
+                str(error),
+            )
 
     def export_plot(self):
         if not self._export_ready():
