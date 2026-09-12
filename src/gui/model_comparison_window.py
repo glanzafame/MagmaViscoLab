@@ -1,8 +1,4 @@
-"""Compare published MVL models using one common sample and physical sweep.
-
-Requires the updated ViscosityEngine and ModelsParametersPanel. All scientific
-calculations are delegated to the engine; this module supplies GUI controls,
-model-domain checks, plotting and reproducible exports.
+"""Compare published MVL models using one common sample and physical sweep
 """
 
 from copy import deepcopy
@@ -987,6 +983,8 @@ class ModelComparisonWindow(QMainWindow):
             "strain_keys": {name: self._strain_key(name) for name in crystal_names if name},
             "raw": {name: [] for name in names},
             "plotted": {name: [] for name in names},
+            "all_results": {name: [] for name in names},
+            "all_result_errors": {name: [] for name in names},
             "errors": {name: [] for name in names}, "cancelled": False,
         }
 
@@ -1043,49 +1041,160 @@ class ModelComparisonWindow(QMainWindow):
                 raise ValueError(f"{name}: {error}") from error
 
     def _calculate_point(self, run, x_value):
-        """Evaluate the saved models at a physical X without changing the sweep."""
+        """Evaluate the selected comparison and retain all six MVL outputs."""
         x_value = self._number(x_value, run["axis"])
         self._check_global_value(run["axis"], x_value)
+
         sample = deepcopy(run["sample"])
         conditions = dict(run["shared"])
         conditions[run["axis"]] = float(x_value)
+
         attribute = self.AXES[run["axis"]][0]
         if attribute:
             setattr(sample, attribute, float(x_value))
+
         candidates, errors = {}, {}
-        base_settings = self._point_settings(run, run["models"][0], conditions)
+        point_settings = {}
+
+        base_settings = self._point_settings(
+            run,
+            run["models"][0],
+            conditions,
+        )
+
         for name in run["models"]:
-            settings = self._point_settings(run, name, conditions)
+            settings = self._point_settings(
+                run,
+                name,
+                conditions,
+            )
+            point_settings[name] = settings
+
             try:
-                self._validate_models_at_point(run["phases"], settings, conditions)
-                candidates[name] = settings[f"{run['group']}_parameters"]
+                self._validate_models_at_point(
+                    run["phases"],
+                    settings,
+                    conditions,
+                )
+                candidates[name] = settings[
+                    f"{run['group']}_parameters"
+                ]
             except Exception as error:
                 errors[name] = str(error)
+
         results = {}
+
         if candidates:
             comparison = self.viscosity_engine.compare_models(
-                sample=sample, group=run["group"], models=candidates,
-                base_settings=base_settings, outputs=(run["output"],),
+                sample=sample,
+                group=run["group"],
+                models=candidates,
+                base_settings=base_settings,
+                outputs=(run["output"],),
             )
             results = comparison["results"]
             errors.update(comparison["errors"])
+
         values = {}
+
         for name in run["models"]:
-            raw = float(results.get(name, {}).get(run["output"], float("nan")))
+            raw = float(
+                results.get(name, {}).get(
+                    run["output"],
+                    float("nan"),
+                )
+            )
+
             if not math.isfinite(raw):
-                errors.setdefault(name, "No finite result at this X value.")
+                errors.setdefault(
+                    name,
+                    "No finite result at this X value.",
+                )
+
             values[name] = raw
-        return conditions, values, errors
+
+        # The plotted comparison above remains unchanged.  In parallel,
+        # calculate the complete canonical MVL result so Excel can always
+        # contain ηm, ηr,c, ηmc, ηr,b, ηmb and ηmcb.
+        all_results = {}
+        all_result_errors = {}
+
+        for name in run["models"]:
+            if name in errors:
+                all_results[name] = {
+                    key: float("nan")
+                    for key in self.OUTPUTS
+                }
+                all_result_errors[name] = errors[name]
+                continue
+
+            try:
+                full_result = self.viscosity_engine.calculate(
+                    sample=deepcopy(sample),
+                    **point_settings[name],
+                )
+
+                all_results[name] = {
+                    key: float(
+                        full_result.get(
+                            key,
+                            float("nan"),
+                        )
+                    )
+                    for key in self.OUTPUTS
+                }
+
+                if not all(
+                    math.isfinite(value)
+                    for value in all_results[name].values()
+                ):
+                    all_result_errors[name] = (
+                        "One or more complete viscosity "
+                        "outputs are not finite."
+                    )
+                else:
+                    all_result_errors[name] = ""
+
+            except Exception as error:
+                all_results[name] = {
+                    key: float("nan")
+                    for key in self.OUTPUTS
+                }
+                all_result_errors[name] = str(error)
+
+        return (
+            conditions,
+            values,
+            errors,
+            all_results,
+            all_result_errors,
+        )
 
     def _evaluate_point(self, run, x_value):
-        conditions, values, errors = self._calculate_point(run, x_value)
+        (
+            conditions,
+            values,
+            errors,
+            all_results,
+            all_result_errors,
+        ) = self._calculate_point(run, x_value)
+
         run["x"].append(float(x_value))
         run["conditions"].append(conditions)
+
         for name in run["models"]:
             raw = values[name]
             run["raw"][name].append(raw)
             run["plotted"][name].append(raw)
-            run["errors"][name].append(errors.get(name, ""))
+            run["all_results"][name].append(
+                all_results[name]
+            )
+            run["all_result_errors"][name].append(
+                all_result_errors.get(name, "")
+            )
+            run["errors"][name].append(
+                errors.get(name, "")
+            )
 
     def calculate_comparison(self):
         if self._busy:
@@ -1329,7 +1438,13 @@ class ModelComparisonWindow(QMainWindow):
             errors = {name: run["errors"][name][index] for name in run["models"]}
         else:
             try:
-                _conditions, values, errors = self._calculate_point(run, x)
+                (
+                    _conditions,
+                    values,
+                    errors,
+                    _all_results,
+                    _all_result_errors,
+                ) = self._calculate_point(run, x)
             except Exception as error:
                 values = {name: float("nan") for name in run["models"]}
                 errors = {name: str(error) for name in run["models"]}
@@ -1636,62 +1751,299 @@ class ModelComparisonWindow(QMainWindow):
     # --- Export exactly the displayed calculation --------------------
 
     def export_frames(self):
-        """Use the 2D Plot layout: one sample sheet, ordinary result columns."""
+        """Export comparison data plus a standard MVL Samples sheet."""
         if self._run is None or self._dirty:
-            raise ValueError("Calculate the current settings before exporting.")
+            raise ValueError(
+                "Calculate the current settings before exporting."
+            )
+
         run = self._run
         reference = self.reference_selector.currentText()
         output = run["output"]
         symbol = f"η{self.OUTPUT_SYMBOLS[output]}"
         relative = output.startswith("eta_r_")
-        notation = symbol if relative else f"log₁₀ {symbol}"
+        notation = (
+            symbol
+            if relative
+            else f"log₁₀ {symbol}"
+        )
+
         result_column = (
             f"{self.OUTPUT_TITLES[output]} {notation}"
-            + ("" if relative else " (Pa·s)")
+            + (
+                ""
+                if relative
+                else " (Pa·s)"
+            )
         )
-        has_errors = any(error for entries in run["errors"].values() for error in entries)
+
+        has_errors = any(
+            error
+            for entries in run["errors"].values()
+            for error in entries
+        )
+
+        has_full_errors = any(
+            error
+            for entries in run["all_result_errors"].values()
+            for error in entries
+        )
+
         model_columns = {
-            "melt": "Liquid viscosity model", "crystal": "Crystal correction model",
+            "melt": "Liquid viscosity model",
+            "crystal": "Crystal correction model",
             "vesicle": "Vesicle correction model",
         }
+
         parameter_prefixes = {
-            "melt": "Liquid parameter", "crystal": "Crystal parameter", "vesicle": "Vesicle parameter",
+            "melt": "Liquid parameter",
+            "crystal": "Crystal parameter",
+            "vesicle": "Vesicle parameter",
         }
+
         rows = []
+
         for name in run["models"]:
             for index, x in enumerate(run["x"]):
                 conditions = run["conditions"][index]
-                raw = run["raw"][name][index]
                 plotted = run["plotted"][name][index]
-                delta = plotted - run["plotted"][reference][index]
-                settings = self._point_settings(run, name, conditions)
+                delta = (
+                    plotted
+                    - run["plotted"][reference][index]
+                )
+
+                settings = self._point_settings(
+                    run,
+                    name,
+                    conditions,
+                )
+
+                complete = run["all_results"][
+                    name
+                ][index]
+
                 row = {
-                    "Sample": str(run["sample"].name), "Compared model": name,
-                    self.AXES[run["axis"]][1]: x,
-                    result_column: plotted if math.isfinite(plotted) else None,
+                    "Sample":
+                        str(run["sample"].name),
+
+                    "Compared model":
+                        name,
+
+                    self.AXES[run["axis"]][1]:
+                        x,
+
+                    "Melt viscosity "
+                    "log₁₀ ηm (Pa·s)":
+                        (
+                            complete["log10_eta_m"]
+                            if math.isfinite(
+                                complete["log10_eta_m"]
+                            )
+                            else None
+                        ),
+
+                    "Crystal correction "
+                    "factor ηr,c":
+                        (
+                            complete["eta_r_c"]
+                            if math.isfinite(
+                                complete["eta_r_c"]
+                            )
+                            else None
+                        ),
+
+                    "Crystal-bearing magma "
+                    "viscosity log₁₀ ηmc (Pa·s)":
+                        (
+                            complete["log10_eta_mc"]
+                            if math.isfinite(
+                                complete["log10_eta_mc"]
+                            )
+                            else None
+                        ),
+
+                    "Vesicle correction "
+                    "factor ηr,b":
+                        (
+                            complete["eta_r_b"]
+                            if math.isfinite(
+                                complete["eta_r_b"]
+                            )
+                            else None
+                        ),
+
+                    "Vesicle-bearing magma "
+                    "viscosity log₁₀ ηmb (Pa·s)":
+                        (
+                            complete["log10_eta_mb"]
+                            if math.isfinite(
+                                complete["log10_eta_mb"]
+                            )
+                            else None
+                        ),
+
+                    "Three-phase magma "
+                    "viscosity log₁₀ ηmcb (Pa·s)":
+                        (
+                            complete["log10_eta_mcb"]
+                            if math.isfinite(
+                                complete["log10_eta_mcb"]
+                            )
+                            else None
+                        ),
+
+                    result_column:
+                        (
+                            plotted
+                            if math.isfinite(plotted)
+                            else None
+                        ),
                 }
-                row[f"Δ {notation} (model − reference)"] = delta if math.isfinite(delta) else None
+
+                row[
+                    f"Δ {notation} "
+                    "(model − reference)"
+                ] = (
+                    delta
+                    if math.isfinite(delta)
+                    else None
+                )
+
                 row["Reference model"] = reference
-                row.update({
-                    self.AXES[label][1]: value for label, value in conditions.items()
-                    if label != run["axis"] and value is not None
-                })
+
+                row.update(
+                    {
+                        self.AXES[label][1]:
+                            value
+
+                        for label, value
+                        in conditions.items()
+
+                        if (
+                            label != run["axis"]
+                            and value is not None
+                        )
+                    }
+                )
+
                 for group in run["phases"]:
                     if group != run["group"]:
-                        row[model_columns[group]] = settings[f"{group}_model"]
-                    rate_key = run["strain_keys"].get(settings["crystal_model"]) if group == "crystal" else None
-                    for key, value in settings[f"{group}_parameters"].items():
+                        row[
+                            model_columns[group]
+                        ] = settings[
+                            f"{group}_model"
+                        ]
+
+                    rate_key = (
+                        run["strain_keys"].get(
+                            settings["crystal_model"]
+                        )
+                        if group == "crystal"
+                        else None
+                    )
+
+                    for key, value in settings[
+                        f"{group}_parameters"
+                    ].items():
                         # Strain rate is already a physical/X column.
                         if key != rate_key:
-                            row[f"{parameter_prefixes[group]} - {key}"] = value
+                            row[
+                                f"{parameter_prefixes[group]} "
+                                f"- {key}"
+                            ] = value
+
                 if has_errors:
-                    row["Error"] = run["errors"][name][index]
+                    row["Error"] = run["errors"][
+                        name
+                    ][index]
+
+                if has_full_errors:
+                    row[
+                        "Complete outputs error"
+                    ] = run[
+                        "all_result_errors"
+                    ][name][index]
+
                 if run["cancelled"]:
-                    row["Calculation"] = f"Partial: {len(run['x'])}/{len(run['requested_x'])} X points (cancelled)"
+                    row["Calculation"] = (
+                        "Partial: "
+                        f"{len(run['x'])}/"
+                        f"{len(run['requested_x'])} "
+                        "X points (cancelled)"
+                    )
+
                 rows.append(row)
-        sheet_name = re.sub(r"[\\/?*\[\]:\x00-\x1f]", "_", str(run["sample"].name))
-        sheet_name = sheet_name[:31].strip("'") or "Sample"
-        return {sheet_name: pd.DataFrame(rows)}
+
+        sheet_name = re.sub(
+            r"[\\/?*\[\]:\x00-\x1f]",
+            "_",
+            str(run["sample"].name),
+        )
+        sheet_name = (
+            sheet_name[:31].strip("'")
+            or "Sample"
+        )
+
+        # Same sample/composition concept used in the other MVL exports.
+        sample = run["sample"]
+
+        sample_row = {
+            "Sample":
+                str(sample.name),
+
+            "Temperature (°C)":
+                getattr(
+                    sample,
+                    "temperature",
+                    None,
+                ),
+
+            "H₂O (wt%)":
+                getattr(
+                    sample,
+                    "H2O",
+                    None,
+                ),
+
+            "Crystals (vol%)":
+                getattr(
+                    sample,
+                    "crystals",
+                    None,
+                ),
+
+            "Vesicles (vol%)":
+                getattr(
+                    sample,
+                    "Vesicles",
+                    None,
+                ),
+        }
+
+        for oxide in self.oxide_names:
+            if not hasattr(sample, oxide):
+                continue
+
+            label = (
+                "F₂O₋₁ (wt%)"
+                if oxide == "F2O_1"
+                else f"{oxide} (wt%)"
+            )
+
+            sample_row[label] = getattr(
+                sample,
+                oxide,
+            )
+
+        return {
+            sheet_name:
+                pd.DataFrame(rows),
+
+            "Samples":
+                pd.DataFrame(
+                    [sample_row]
+                ),
+        }
 
     def write_excel(self, filename):
         from openpyxl.styles import Alignment
