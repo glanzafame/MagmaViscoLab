@@ -1,5 +1,7 @@
 from copy import deepcopy
 import math
+import sys
+from pathlib import Path
 
 import pandas as pd
 from PySide6.QtCore import Qt
@@ -74,7 +76,7 @@ class MainWindow(QMainWindow):
         self.physical_panel.water_changed.connect(self.update_composition_h2o)
 
         self.setWindowTitle("MagmaViscoLab 1.0")
-        self.setWindowIcon(QIcon("resources/logo.png"))
+        self.setWindowIcon(QIcon(self.resource_path("Logo.png")))
         self.resize(1500, 900)
         self.setMinimumSize(1150, 720)
         self.menuBar().hide()
@@ -83,6 +85,16 @@ class MainWindow(QMainWindow):
         self.apply_interface_style()
 
     # --- Interface helpers ------------------------------------------
+
+    @staticmethod
+    def resource_path(filename):
+        """Return a resource path that works in source and PyInstaller builds."""
+        if getattr(sys, "frozen", False):
+            base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        else:
+            base = Path(__file__).resolve().parents[2]
+
+        return str(base / "resources" / filename)
 
     @staticmethod
     def create_section_title(text):
@@ -125,7 +137,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         logo.setAlignment(Qt.AlignCenter)
         logo.setMinimumHeight(120)
-        pixmap = QPixmap("resources/logo.png")
+        pixmap = QPixmap(self.resource_path("Logo.png"))
         if not pixmap.isNull():
             logo.setPixmap(
                 pixmap.scaled(
@@ -1344,7 +1356,7 @@ class MainWindow(QMainWindow):
 
         mvl_logo = QLabel()
         mvl_logo.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("resources/logo.png")
+        pixmap = QPixmap(self.resource_path("Logo.png"))
         if not pixmap.isNull():
             mvl_logo.setPixmap(
                 pixmap.scaled(
@@ -1374,7 +1386,7 @@ class MainWindow(QMainWindow):
 
         klara_logo = QLabel()
         klara_logo.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("resources/klara_logo.png")
+        pixmap = QPixmap(self.resource_path("Klara_logo.png"))
         if not pixmap.isNull():
             klara_logo.setPixmap(
                 pixmap.scaled(
