@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         self.physical_panel.water_changed.connect(self.update_composition_h2o)
 
         self.setWindowTitle("MagmaViscoLab 1.0")
-        self.setWindowIcon(QIcon("resources/Logo.png"))
+        self.setWindowIcon(QIcon("resources/logo.png"))
         self.resize(1500, 900)
         self.setMinimumSize(1150, 720)
         self.menuBar().hide()
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         logo.setAlignment(Qt.AlignCenter)
         logo.setMinimumHeight(120)
-        pixmap = QPixmap("resources/Logo.png")
+        pixmap = QPixmap("resources/logo.png")
         if not pixmap.isNull():
             logo.setPixmap(
                 pixmap.scaled(
@@ -831,15 +831,48 @@ class MainWindow(QMainWindow):
     @classmethod
     def create_calculation_record(cls, sample, result, settings):
         """Create an immutable snapshot for the next Excel export."""
+        physical_parameters = {
+            "Temperature (°C)": sample.temperature,
+            "H₂O (wt%)": sample.H2O,
+            "Crystals (vol%)": sample.crystals,
+            "Vesicles (vol%)": sample.Vesicles,
+        }
+
+        sample_inputs = {
+            "Sample": str(sample.name),
+            **physical_parameters,
+        }
+
+        attributes = (
+            vars(sample)
+            if hasattr(sample, "__dict__")
+            else {}
+        )
+
+        excluded = {
+            "name",
+            "temperature",
+            "H2O",
+            "crystals",
+            "Vesicles",
+            *cls.RESULT_ATTRIBUTES,
+        }
+
+        for attribute, value in attributes.items():
+            if attribute in excluded:
+                continue
+
+            if value is None or pd.api.types.is_scalar(value):
+                sample_inputs[attribute] = value
+
         return {
             "sample": str(sample.name),
-            "result": {name: result[name] for name in cls.RESULT_ATTRIBUTES},
-            "physical_parameters": {
-                "Temperature (°C)": sample.temperature,
-                "H₂O (wt%)": sample.H2O,
-                "Crystals (vol%)": sample.crystals,
-                "Vesicles (vol%)": sample.Vesicles,
+            "result": {
+                name: result[name]
+                for name in cls.RESULT_ATTRIBUTES
             },
+            "physical_parameters": physical_parameters,
+            "sample_inputs": sample_inputs,
             "settings": deepcopy(settings),
         }
 
@@ -896,70 +929,275 @@ class MainWindow(QMainWindow):
     # --- Excel export -----------------------------------------------
 
     def export_excel(self):
-        """Export the results produced by the latest calculation."""
+        """Export the latest calculation using the standard MVL workbook layout."""
         if not self.last_calculation_records:
             QMessageBox.warning(
-                self, "No calculation results",
+                self,
+                "No calculation results",
                 "Run Calculate or Calculate all samples before exporting.",
             )
             return
 
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Excel", "", "Excel Files (*.xlsx)"
+            self,
+            "Export Excel",
+            "MVL_calculation.xlsx",
+            "Excel Files (*.xlsx)",
         )
+
         if not filename:
             return
+
         if not filename.lower().endswith(".xlsx"):
             filename += ".xlsx"
 
-        rows = [
-            self.calculation_record_to_export_row(record)
-            for record in self.last_calculation_records
-        ]
         try:
-            pd.DataFrame(rows).to_excel(filename, index=False)
+            self._write_calculation_excel(filename)
+
             source = (
                 "Calculate all samples"
                 if self.last_calculation_scope == "all"
                 else "Calculate"
             )
+
             QMessageBox.information(
-                self, "Export completed",
-                f"Exported {len(rows)} sample result(s) "
-                f"from the last {source} operation to:\n\n{filename}",
+                self,
+                "Export completed",
+                (
+                    f"Saved {len(self.last_calculation_records)} "
+                    "sample sheet(s), all four viscosities, "
+                    "ηr,c, ηr,b and calculation settings "
+                    f"from the last {source} operation."
+                    f"\n\n{filename}"
+                ),
             )
+
         except Exception as error:
             QMessageBox.critical(
-                self, "Export error", f"Unable to export Excel file.\n\n{error}"
+                self,
+                "Export error",
+                f"Unable to export Excel file.\n\n{error}",
             )
+
+    def _write_calculation_excel(self, filename):
+        """Write MainWindow results with the same structure as 2D and 3D exports."""
+        records = self.last_calculation_records
+        used_names = {"parameters", "samples"}
+
+        settings = records[0]["settings"]
+
+        source = (
+            "Calculate all samples"
+            if self.last_calculation_scope == "all"
+            else "Calculate"
+        )
+
+        metadata = [
+            ("Calculation source", source),
+            ("Calculated samples", len(records)),
+        ]
+
+        for group in ("melt", "crystal", "vesicle"):
+            metadata.append(
+                (
+                    f"{group.title()} model",
+                    settings[f"{group}_model"],
+                )
+            )
+
+            metadata.extend(
+                (
+                    f"{group.title()} parameter — {name}",
+                    value,
+                )
+                for name, value in
+                settings[f"{group}_parameters"].items()
+            )
+
+        metadata.append(
+            (
+                "Sample inputs",
+                "Samples sheet contains the input snapshot "
+                "used for the exported calculation.",
+            )
+        )
+
+        oxide_names = set(
+            getattr(
+                self.composition_panel,
+                "OXIDES",
+                (),
+            )
+        )
+
+        snapshots = []
+
+        for record in records:
+            snapshot = {}
+
+            for name, value in record.get(
+                "sample_inputs",
+                {},
+            ).items():
+                if name in oxide_names:
+                    label = (
+                        "F₂O₋₁ (wt%)"
+                        if name == "F2O_1"
+                        else f"{name} (wt%)"
+                    )
+                else:
+                    label = name
+
+                snapshot[label] = value
+
+            if not snapshot:
+                snapshot = {
+                    "Sample": record["sample"],
+                    **record["physical_parameters"],
+                }
+
+            snapshots.append(snapshot)
+
+        with pd.ExcelWriter(
+            filename,
+            engine="openpyxl",
+        ) as writer:
+
+            for record in records:
+                row = (
+                    self.calculation_record_to_export_row(
+                        record
+                    )
+                )
+
+                sheet_name = self.make_export_sheet_name(
+                    record["sample"],
+                    used_names,
+                )
+
+                pd.DataFrame([row]).to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False,
+                )
+
+            pd.DataFrame(
+                metadata,
+                columns=["Parameter", "Value"],
+            ).to_excel(
+                writer,
+                sheet_name="Parameters",
+                index=False,
+            )
+
+            pd.DataFrame(
+                snapshots,
+            ).to_excel(
+                writer,
+                sheet_name="Samples",
+                index=False,
+            )
+
+            for sheet in writer.book.worksheets:
+                sheet.freeze_panes = "A2"
+                sheet.auto_filter.ref = sheet.dimensions
+
+                for cells in sheet.iter_cols(
+                    min_row=1,
+                    max_row=1,
+                ):
+                    cell = cells[0]
+                    sheet.column_dimensions[
+                        cell.column_letter
+                    ].width = min(
+                        40,
+                        max(
+                            17,
+                            len(str(cell.value)) + 3,
+                        ),
+                    )
+
+        # Reuse the same η-subscript formatting used by the 2D/3D exports.
+        from gui.plot_window import PlotWindow
+
+        PlotWindow._format_excel_subscripts(
+            filename
+        )
 
     @staticmethod
     def calculation_record_to_export_row(record):
-        """Convert one calculation snapshot into an Excel row."""
+        """Convert one calculation snapshot into a standard MVL data row."""
         result = record["result"]
-        settings = record["settings"]
-        row = {
-            "Sample": record["sample"],
-            "Melt viscosity log₁₀ ηm (Pa·s)": result["log10_eta_m"],
-            "Crystal correction factor ηr,c": result["eta_r_c"],
-            "Crystal-bearing magma viscosity log₁₀ ηmc (Pa·s)": result["log10_eta_mc"],
-            "Vesicle correction factor ηr,b": result["eta_r_b"],
-            "Vesicle-bearing magma viscosity log₁₀ ηmb (Pa·s)": result["log10_eta_mb"],
-            "Three-phase magma viscosity log₁₀ ηmcb (Pa·s)": result["log10_eta_mcb"],
-            "Liquid viscosity model": settings["melt_model"],
-            "Crystal correction model": settings["crystal_model"],
-            "Vesicle correction model": settings["vesicle_model"],
-            **record["physical_parameters"],
+
+        return {
+            "Sample":
+                record["sample"],
+
+            "Melt viscosity "
+            "log₁₀ ηm (Pa·s)":
+                result["log10_eta_m"],
+
+            "Crystal correction "
+            "factor ηr,c":
+                result["eta_r_c"],
+
+            "Crystal-bearing magma viscosity "
+            "log₁₀ ηmc (Pa·s)":
+                result["log10_eta_mc"],
+
+            "Vesicle correction "
+            "factor ηr,b":
+                result["eta_r_b"],
+
+            "Vesicle-bearing magma viscosity "
+            "log₁₀ ηmb (Pa·s)":
+                result["log10_eta_mb"],
+
+            "Three-phase magma viscosity "
+            "log₁₀ ηmcb (Pa·s)":
+                result["log10_eta_mcb"],
+
+            "Status":
+                "OK",
+
+            "Error":
+                "",
         }
-        groups = {
-            "Liquid parameter": settings["melt_parameters"],
-            "Crystal parameter": settings["crystal_parameters"],
-            "Vesicle parameter": settings["vesicle_parameters"],
-        }
-        for prefix, parameters in groups.items():
-            for name, value in parameters.items():
-                row[f"{prefix} - {name}"] = value
-        return row
+
+    @staticmethod
+    def make_export_sheet_name(name, used_names):
+        """Create a valid, unique Excel worksheet name."""
+        sheet_name = str(name)
+
+        for character in "\\/?*[]:":
+            sheet_name = sheet_name.replace(
+                character,
+                "_",
+            )
+
+        sheet_name = (
+            sheet_name[:31]
+            or "Sample"
+        )
+
+        original = sheet_name
+        counter = 1
+
+        while sheet_name.casefold() in used_names:
+            suffix = f"_{counter}"
+            sheet_name = (
+                original[
+                    :31 - len(suffix)
+                ]
+                + suffix
+            )
+            counter += 1
+
+        used_names.add(
+            sheet_name.casefold()
+        )
+
+        return sheet_name
 
     # --- Plot windows ------------------------------------------------
 
@@ -1106,7 +1344,7 @@ class MainWindow(QMainWindow):
 
         mvl_logo = QLabel()
         mvl_logo.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("resources/Logo.png")
+        pixmap = QPixmap("resources/logo.png")
         if not pixmap.isNull():
             mvl_logo.setPixmap(
                 pixmap.scaled(
@@ -1136,7 +1374,7 @@ class MainWindow(QMainWindow):
 
         klara_logo = QLabel()
         klara_logo.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("resources/Klara_logo.png")
+        pixmap = QPixmap("resources/klara_logo.png")
         if not pixmap.isNull():
             klara_logo.setPixmap(
                 pixmap.scaled(
