@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use MagmaViscoLab in your research, please cite this software."
+type: software
+title: "MagmaViscoLab"
+version: "1.0.0"
+date-released: 2026-09-12
+doi: "10.5281/zenodo.22725866"
+license: GPL-3.0-or-later
+
+authors:
+  - family-names: "Lanzafame"
+    given-names: "Gabriele"
+    orcid: "https://orcid.org/0000-0001-5352-9918"
+    affiliation: "Università degli Studi di Catania"
+
+repository-code: "https://github.com/glanzafame/MagmaViscoLab"
+url: "https://doi.org/10.5281/zenodo.22725866"
