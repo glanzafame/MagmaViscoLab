@@ -1,3 +1,9 @@
+## Citation
+
+If you use MagmaViscoLab in your research, please cite:
+
+Lanzafame, G. (2026). *MagmaViscoLab* (Version 1.0.0) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.22725866
+
 # MagmaViscoLab 1.0
 
 MagmaViscoLab (MVL) is a Python desktop application for calculating and visualizing magma and lava viscosity. It combines selectable melt-viscosity models with crystal and vesicle corrections, using chemical compositions and physical conditions supplied through an Excel workbook or edited in the graphical interface.
