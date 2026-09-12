@@ -1,4 +1,4 @@
-"""Multi-sample MVL 2D plots with editable axes and persistent curve styles."""
+"""Multi-sample MVL 2D plots"""
 from copy import deepcopy
 from pathlib import Path
 import math
@@ -1856,9 +1856,13 @@ class PlotWindow(QMainWindow):
     # --- Excel export ----------------------------------------------
 
     def export_excel(self):
-        """Export the latest plot calculation, one sheet per sample."""
+        """Export the latest 2D calculation using the standard MVL workbook layout."""
         if self._inputs_dirty:
-            QMessageBox.warning(self, "Settings changed", "Calculate the current settings before exporting.")
+            QMessageBox.warning(
+                self,
+                "Settings changed",
+                "Calculate the current settings before exporting.",
+            )
             return
 
         if (
@@ -1875,65 +1879,28 @@ class PlotWindow(QMainWindow):
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Save plot data",
-            "",
+            "MVL_2D_plot.xlsx",
             "Excel Files (*.xlsx)",
         )
 
         if not filename:
             return
 
-        if not filename.lower().endswith(
-            ".xlsx"
-        ):
+        if not filename.lower().endswith(".xlsx"):
             filename += ".xlsx"
 
         try:
-            with pd.ExcelWriter(
-                filename,
-                engine="openpyxl",
-            ) as writer:
-                used_names = set()
-
-                for sample_name, sample_results in (
-                    self.last_plot_results.items()
-                ):
-                    sample = (
-                        self.last_plot_samples
-                        or {}
-                    ).get(sample_name)
-
-                    if sample is None:
-                        continue
-
-                    rows = [
-                        self._export_row(
-                            sample,
-                            value,
-                            result,
-                        )
-                        for value, result in zip(
-                            self.last_plot_values,
-                            sample_results,
-                        )
-                    ]
-
-                    if rows:
-                        pd.DataFrame(rows).to_excel(
-                            writer,
-                            sheet_name=self.make_sheet_name(
-                                sample_name,
-                                used_names,
-                            ),
-                            index=False,
-                        )
-
-            self._format_excel_subscripts(filename)
+            self._write_excel(filename)
 
             QMessageBox.information(
                 self,
                 "Export completed",
-                "Excel file successfully saved:"
-                f"\n\n{filename}",
+                (
+                    f"Saved {len(self.last_plot_results)} "
+                    "sample sheet(s), all four viscosities, "
+                    "ηr,c, ηr,b and calculation settings."
+                    f"\n\n{filename}"
+                ),
             )
 
         except Exception as error:
@@ -1944,153 +1911,297 @@ class PlotWindow(QMainWindow):
                 f"\n\n{error}",
             )
 
-    def _export_row(
-        self,
-        sample,
-        x_value,
-        result,
-    ):
-        """Convert one calculated plot point into an Excel row."""
-        parameter = self.last_plot_parameter
-        settings = self.last_plot_settings
+    def _write_excel(self, filename):
+        """Write the same workbook structure used by the 3D export."""
+        used_names = {"parameters", "samples"}
 
-        x_column = self.EXPORT_AXIS_LABELS.get(
+        parameter = self.last_plot_parameter
+        x_label = self.EXPORT_AXIS_LABELS.get(
             parameter,
             parameter,
         )
+        displayed = self.get_selected_result()["title"]
 
-        fixed_physical_parameters = {
-            "Temperature (°C)":
-                sample.temperature,
-
-            "H₂O (wt%)":
-                sample.H2O,
-
-            "Crystals (vol%)":
-                sample.crystals,
-
-            "Vesicles (vol%)":
-                sample.Vesicles,
-        }
-
-        variable_column = (
-            self.EXPORT_AXIS_LABELS.get(
-                parameter
-            )
-            if parameter
-            in self.SAMPLE_ATTRIBUTES
+        x_from = (
+            self.last_plot_values[0]
+            if self.last_plot_values
+            else None
+        )
+        x_to = (
+            self.last_plot_values[-1]
+            if self.last_plot_values
             else None
         )
 
-        if variable_column is not None:
-            fixed_physical_parameters.pop(
-                variable_column,
-                None,
-            )
+        metadata = [
+            ("Displayed viscosity", displayed),
+            ("X axis", x_label),
+            ("X From", x_from),
+            ("X To", x_to),
+            ("X Step", self.last_plot_step),
+        ]
 
-        row = {
-            "Sample":
-                sample.name,
+        settings = self.last_plot_settings
 
-            x_column:
-                x_value,
-
-            "Melt viscosity log₁₀ ηm (Pa·s)":
-                result.get(
-                    "log10_eta_m",
-                    np.nan,
-                ),
-
-            "Crystal correction factor ηr,c":
-                result.get(
-                    "eta_r_c",
-                    np.nan,
-                ),
-
-            "Crystal-bearing magma viscosity "
-            "log₁₀ ηmc (Pa·s)":
-                result.get(
-                    "log10_eta_mc",
-                    np.nan,
-                ),
-
-            "Vesicle correction factor ηr,b":
-                result.get(
-                    "eta_r_b",
-                    np.nan,
-                ),
-
-            "Vesicle-bearing magma viscosity "
-            "log₁₀ ηmb (Pa·s)":
-                result.get(
-                    "log10_eta_mb",
-                    np.nan,
-                ),
-
-            "Three-phase magma viscosity "
-            "log₁₀ ηmcb (Pa·s)":
-                result.get(
-                    "log10_eta_mcb",
-                    np.nan,
-                ),
-
-            "Liquid viscosity model":
-                settings["melt_model"],
-
-            "Crystal correction model":
-                settings["crystal_model"],
-
-            "Vesicle correction model":
-                settings["vesicle_model"],
-
-            **fixed_physical_parameters,
-        }
-
-        for key, value in (
-            settings["melt_parameters"].items()
-        ):
-            row[
-                f"Liquid parameter - {key}"
-            ] = value
-
-        crystal_parameters = deepcopy(
-            settings["crystal_parameters"]
-        )
-
-        if parameter == "γ̇ (strain rate)":
-            strain_name = (
-                self.get_strain_rate_parameter_name(
-                    crystal_parameters
+        for group in ("melt", "crystal", "vesicle"):
+            metadata.append(
+                (
+                    f"{group.title()} model",
+                    settings[f"{group}_model"],
                 )
             )
 
-            if strain_name is not None:
-                crystal_parameters.pop(
-                    strain_name,
+            parameters = deepcopy(
+                settings[f"{group}_parameters"]
+            )
+
+            if (
+                group == "crystal"
+                and parameter == "γ̇ (strain rate)"
+            ):
+                strain_name = (
+                    self.get_strain_rate_parameter_name(
+                        parameters
+                    )
+                )
+
+                if strain_name is not None:
+                    parameters.pop(
+                        strain_name,
+                        None,
+                    )
+
+            metadata.extend(
+                (
+                    f"{group.title()} parameter — {name}",
+                    value,
+                )
+                for name, value in parameters.items()
+            )
+
+        metadata.append(
+            (
+                "Sample inputs",
+                "Samples sheet contains fixed inputs; "
+                "the X column overrides the swept value "
+                "at each calculated point.",
+            )
+        )
+
+        snapshots = []
+        oxides = list(
+            getattr(
+                getattr(
+                    self.main_window,
+                    "composition_panel",
+                    None,
+                ),
+                "OXIDES",
+                (),
+            )
+        )
+
+        for name, sample in (
+            (self.last_plot_samples or {}).items()
+        ):
+            record = {"Sample": name}
+
+            for physical_parameter, attribute in (
+                self.SAMPLE_ATTRIBUTES.items()
+            ):
+                record[
+                    self.EXPORT_AXIS_LABELS[
+                        physical_parameter
+                    ]
+                ] = getattr(
+                    sample,
+                    attribute,
+                )
+
+            attributes = (
+                vars(sample)
+                if hasattr(sample, "__dict__")
+                else {}
+            )
+
+            for attribute in dict.fromkeys(
+                [*oxides, *attributes]
+            ):
+                if attribute in {
+                    "name",
+                    *self.SAMPLE_ATTRIBUTES.values(),
+                    *self.RESULT_KEYS,
+                }:
+                    continue
+
+                value = getattr(
+                    sample,
+                    attribute,
                     None,
                 )
 
-        for key, value in (
-            crystal_parameters.items()
-        ):
-            row[
-                f"Crystal parameter - {key}"
-            ] = value
+                if (
+                    value is None
+                    or isinstance(
+                        value,
+                        (
+                            str,
+                            int,
+                            float,
+                            bool,
+                            np.number,
+                        ),
+                    )
+                ):
+                    record[
+                        (
+                            f"{attribute} (wt%)"
+                            if attribute in oxides
+                            else attribute
+                        )
+                    ] = value
 
-        for key, value in (
-            settings["vesicle_parameters"].items()
-        ):
-            row[
-                f"Vesicle parameter - {key}"
-            ] = value
+            snapshots.append(record)
 
-        if self.last_plot_errors:
-            row["Error"] = self._error_messages.get((sample.name, x_value), "")
-        return row
+        with pd.ExcelWriter(
+            filename,
+            engine="openpyxl",
+        ) as writer:
+
+            for sample_name, sample_results in (
+                self.last_plot_results.items()
+            ):
+                rows = []
+
+                for x_value, result in zip(
+                    self.last_plot_values,
+                    sample_results,
+                ):
+                    message = self._error_messages.get(
+                        (sample_name, x_value),
+                        "",
+                    )
+
+                    rows.append(
+                        {
+                            "Sample":
+                                sample_name,
+
+                            x_label:
+                                x_value,
+
+                            "Melt viscosity "
+                            "log₁₀ ηm (Pa·s)":
+                                result.get(
+                                    "log10_eta_m",
+                                    np.nan,
+                                ),
+
+                            "Crystal correction "
+                            "factor ηr,c":
+                                result.get(
+                                    "eta_r_c",
+                                    np.nan,
+                                ),
+
+                            "Crystal-bearing magma "
+                            "viscosity log₁₀ ηmc (Pa·s)":
+                                result.get(
+                                    "log10_eta_mc",
+                                    np.nan,
+                                ),
+
+                            "Vesicle correction "
+                            "factor ηr,b":
+                                result.get(
+                                    "eta_r_b",
+                                    np.nan,
+                                ),
+
+                            "Vesicle-bearing magma "
+                            "viscosity log₁₀ ηmb (Pa·s)":
+                                result.get(
+                                    "log10_eta_mb",
+                                    np.nan,
+                                ),
+
+                            "Three-phase magma "
+                            "viscosity log₁₀ ηmcb (Pa·s)":
+                                result.get(
+                                    "log10_eta_mcb",
+                                    np.nan,
+                                ),
+
+                            "Status":
+                                (
+                                    "Error"
+                                    if message
+                                    else "OK"
+                                ),
+
+                            "Error":
+                                message,
+                        }
+                    )
+
+                sheet_name = self.make_sheet_name(
+                    sample_name,
+                    used_names,
+                )
+
+                pd.DataFrame(rows).to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False,
+                )
+
+            pd.DataFrame(
+                metadata,
+                columns=["Parameter", "Value"],
+            ).to_excel(
+                writer,
+                sheet_name="Parameters",
+                index=False,
+            )
+
+            pd.DataFrame(
+                snapshots,
+            ).to_excel(
+                writer,
+                sheet_name="Samples",
+                index=False,
+            )
+
+            for sheet in writer.book.worksheets:
+                sheet.freeze_panes = "A2"
+                sheet.auto_filter.ref = (
+                    sheet.dimensions
+                )
+
+                for cells in sheet.iter_cols(
+                    min_row=1,
+                    max_row=1,
+                ):
+                    cell = cells[0]
+                    sheet.column_dimensions[
+                        cell.column_letter
+                    ].width = min(
+                        40,
+                        max(
+                            17,
+                            len(
+                                str(cell.value)
+                            ) + 3,
+                        ),
+                    )
+
+        self._format_excel_subscripts(
+            filename
+        )
 
     @staticmethod
     def make_sheet_name(name, used_names):
-        """Create a valid and unique Excel worksheet name."""
+        """Create a valid, unique Excel worksheet name."""
         sheet_name = str(name)
 
         for character in "\\/?*[]:":
@@ -2107,7 +2218,7 @@ class PlotWindow(QMainWindow):
         original = sheet_name
         counter = 1
 
-        while sheet_name in used_names:
+        while sheet_name.casefold() in used_names:
             suffix = f"_{counter}"
             sheet_name = (
                 original[
@@ -2117,7 +2228,10 @@ class PlotWindow(QMainWindow):
             )
             counter += 1
 
-        used_names.add(sheet_name)
+        used_names.add(
+            sheet_name.casefold()
+        )
+
         return sheet_name
 
     # --- Figure export ---------------------------------------------
@@ -2188,8 +2302,8 @@ class PlotWindow(QMainWindow):
 
     def _mvl_icon(self):
         """Resolve the same application logo even from another working directory."""
-        for path in (Path(__file__).resolve().parents[2] / "resources" / "Logo.png",
-                     Path("resources/Logo.png")):
+        for path in (Path(__file__).resolve().parents[1] / "resources" / "logo.png",
+                     Path("resources/logo.png")):
             if path.is_file():
                 return QIcon(str(path))
         getter = getattr(self.main_window, "windowIcon", None)
@@ -2585,9 +2699,10 @@ class PlotWindow(QMainWindow):
                 for key in ("color", "linestyle", "linewidth", "marker", "markersize",
                             "markerfacecolor", "markeredgecolor", "markeredgewidth", "label", "alpha", "drawstyle")
             }
-        for checkbox, sample in self.sample_checks:
-            color = to_hex(self._sample_styles[str(sample.name)]["color"])
-            checkbox.setStyleSheet(f"QCheckBox {{ color: {color}; }}")
+        # Keep sample names in the selection panel in the standard UI color.
+        # Curve colors are used only in the plot, legend and results table.
+        for checkbox, _sample in self.sample_checks:
+            checkbox.setStyleSheet("")
         if self.last_plot_results is not None:
             for row, name in enumerate(self.last_plot_results):
                 item = self.results_table.item(row, 0)
